@@ -40,6 +40,11 @@ export const AnalyzeButton: React.FC<AnalyzeButtonProps> = ({ state, onExtract }
           Failed to extract policy. Please try again.
         </p>
       )}
+      {state === ('analysis-error' as any) && (
+        <p className="text-red-500 text-sm mt-2 text-center font-medium">
+          PrivacyLens couldn't complete the AI analysis.
+        </p>
+      )}
     </div>
   );
 };
