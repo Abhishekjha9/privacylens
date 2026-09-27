@@ -1,61 +1,32 @@
-# PrivacyLens (Phase 1)
+# React + TypeScript + Vite
 
-PrivacyLens is an AI-powered browser extension that helps users understand Privacy Policies and Terms & Conditions. This repository contains the Phase 1 implementation which focuses on detecting and extracting the policy content locally within the browser.
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
-## Features
-- Automatically detects Privacy Policy and Terms of Service pages
-- Extracts the main text while ignoring ads, footers, navigation, etc.
-- Calculates word count and estimated reading time
-- Provides a simple UI to copy the extracted text
-- Fully local execution (no backend for Phase 1)
+Currently, two official plugins are available:
 
-## Setup & Installation
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-### Requirements
-- Node.js (v18+ recommended)
-- npm
+## React Compiler
 
-### Development
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
-2. Run development server (for UI development):
-   ```bash
-   npm run dev
-   ```
-3. Run tests:
-   ```bash
-   npx vitest run
-   ```
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-### Building & Loading into Chrome
+## Expanding the Oxlint configuration
 
-1. Build the production extension:
-   ```bash
-   npm run build
-   ```
-2. Open Google Chrome and navigate to `chrome://extensions`.
-3. Enable **Developer mode** using the toggle in the top right corner.
-4. Click **Load unpacked**.
-5. Select the `dist` folder located inside `privacylens/extension/dist`.
-6. Pin the extension to your toolbar.
+If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
 
-## How to Test
-1. Visit a Privacy Policy page (e.g., https://example.com/privacy).
-2. Click the PrivacyLens icon in your toolbar.
-3. The popup will indicate that a policy was detected.
-4. Click **Extract Policy**.
-5. You should see the extraction results (word count, reading time) and a preview of the text.
-6. Test on a non-policy page to see the "No policy detected" state.
+```json
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "oxc"],
+  "options": {
+    "typeAware": true
+  },
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/only-export-components": ["warn", { "allowConstantExport": true }]
+  }
+}
+```
 
-## Known Limitations
-- Phase 1 does not analyze the text with AI.
-- Detection relies on common URL patterns, headers, and text signals. Unconventional policy pages might not be automatically detected.
-- Highly dynamic single-page applications might require a page reload if the policy content doesn't trigger the detection threshold immediately.
-
-## Recommended Next Steps for Phase 2
-- **Backend Setup**: Create a Next.js server to handle API requests safely.
-- **AI Integration**: Hook up the Groq API to analyze the extracted `PolicyDocument` for key risks.
-- **Chunking Integration**: The `chunker.ts` utility is ready to be used if the policy text exceeds LLM context windows.
-- **UI Enhancements**: Replace the extraction preview with a detailed analysis report showing structured risk information and scores.
+See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
