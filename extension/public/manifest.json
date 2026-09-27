@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "PrivacyLens",
+  "version": "1.0.0",
+  "description": "Analyze Privacy Policies and Terms & Conditions.",
+  "action": {
+    "default_popup": "index.html"
+  },
+  "background": {
+    "service_worker": "assets/background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ]
+}
