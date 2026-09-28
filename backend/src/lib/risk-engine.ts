@@ -18,19 +18,29 @@ export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
   
   CATEGORIES.forEach(cat => categoriesMap.set(cat, []));
 
-  // 1. Group findings by category and merge duplicates
-  findings.forEach(finding => {
+  // 1. Deduplicate findings deterministically
+  const uniqueFindings: ChunkFinding[] = [];
+  const seen = new Set<string>();
+  
+  for (const f of findings) {
+    const normCategory = f.category.toLowerCase().trim();
+    const normTitle = f.title.toLowerCase().trim();
+    const normEvidence = f.evidence.toLowerCase().trim();
+    
+    // Create a unique key for deduplication
+    const key = `${normCategory}::${normTitle}::${normEvidence}`;
+    
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueFindings.push(f);
+    }
+  }
+
+  // 1.5 Group findings by category
+  uniqueFindings.forEach(finding => {
     const cat = finding.category as CategoryType;
     if (categoriesMap.has(cat)) {
-      const existing = categoriesMap.get(cat)!;
-      // Simple deduplication: if there's already a finding with similar title or exact evidence, skip
-      const isDuplicate = existing.some(e => 
-        e.evidence === finding.evidence || 
-        (e.title.toLowerCase() === finding.title.toLowerCase())
-      );
-      if (!isDuplicate) {
-        existing.push(finding);
-      }
+      categoriesMap.get(cat)!.push(finding);
     }
   });
 
@@ -53,13 +63,15 @@ export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
     }
 
     // Determine category risk deterministically: highest severity of findings
-    let catRisk: RiskLevel = "LOW";
+    let catRisk: RiskLevel = "EXPECTED";
     if (catFindings.some(f => f.severity === "HIGH")) {
       catRisk = "HIGH";
       overallHigh++;
     } else if (catFindings.some(f => f.severity === "MEDIUM")) {
       catRisk = "MEDIUM";
       overallMedium++;
+    } else if (catFindings.some(f => f.severity === "LOW")) {
+      catRisk = "LOW";
     }
 
     const summary = buildCategorySummary(cat, catRisk, catFindings);
@@ -92,6 +104,9 @@ export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
   let overallRisk: RiskLevel = "LOW";
   if (overallHigh > 0) overallRisk = "HIGH";
   else if (overallMedium > 2) overallRisk = "MEDIUM";
+  else if (categories.every(c => c.risk === "NOT_FOUND" || c.risk === "EXPECTED") && categories.some(c => c.risk === "EXPECTED")) {
+    overallRisk = "EXPECTED";
+  }
 
   const overallSummary = buildOverallSummary(overallRisk, overallHigh, importantClauses.length);
 
@@ -106,7 +121,14 @@ export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
 function buildCategorySummary(cat: CategoryType, risk: RiskLevel, findings: ChunkFinding[]): string {
   if (findings.length === 1) return findings[0].explanation;
   
-  return `Identified ${findings.length} key points regarding ${cat.replace('_', ' ')}. Includes ${risk.toLowerCase()} risk statements.`;
+  // Create a useful summary based on the actual findings
+  const highMedium = findings.filter(f => f.severity === "HIGH" || f.severity === "MEDIUM");
+  
+  if (highMedium.length > 0) {
+    return highMedium.map(f => f.explanation).join(" ");
+  }
+
+  return findings.map(f => f.explanation).join(" ");
 }
 
 function buildOverallSummary(risk: RiskLevel, highCount: number, clauseCount: number): string {

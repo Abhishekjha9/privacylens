@@ -1,4 +1,4 @@
-export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "NOT_FOUND";
+export type RiskLevel = "EXPECTED" | "LOW" | "MEDIUM" | "HIGH" | "NOT_FOUND";
 
 export type CategoryType =
   | "data_collection"

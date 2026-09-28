@@ -34,14 +34,16 @@ export const ReportUI: React.FC<ReportUIProps> = ({ analysis }) => {
 };
 
 const RiskBadge: React.FC<{ risk: RiskLevel }> = ({ risk }) => {
-  const colors = {
+  const colors: Record<RiskLevel, string> = {
+    EXPECTED: 'bg-blue-50 text-blue-600 border-blue-200',
     HIGH: 'bg-red-100 text-red-700 border-red-200',
     MEDIUM: 'bg-orange-100 text-orange-700 border-orange-200',
     LOW: 'bg-green-100 text-green-700 border-green-200',
     NOT_FOUND: 'bg-gray-100 text-gray-700 border-gray-200'
   };
 
-  const icons = {
+  const icons: Record<RiskLevel, React.ReactNode> = {
+    EXPECTED: <CheckCircle2 className="w-3 h-3" />,
     HIGH: <AlertTriangle className="w-3 h-3" />,
     MEDIUM: <Info className="w-3 h-3" />,
     LOW: <CheckCircle2 className="w-3 h-3" />,

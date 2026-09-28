@@ -8,8 +8,7 @@ async function main() {
   console.log("Testing Analyzer API with Real LinkedIn Policy...");
   
   const text = fs.readFileSync("/Users/abhisk/.gemini/antigravity-ide/brain/5d2a84dc-b967-4d60-8ce1-963f4fa0556c/.system_generated/steps/576/content.md", "utf-8");
-  // Only take first 6000 chars for now as requested
-  const chunkText = text.substring(0, 6000);
+  const chunkText = text;
 
   const mockPolicy: PolicyDocument = {
     title: "LinkedIn Privacy Policy",
@@ -23,10 +22,13 @@ async function main() {
     extractedText: chunkText
   };
 
+  const start = Date.now();
   try {
     const analysis = await analyzePolicyText(mockPolicy);
+    const end = Date.now();
     console.log("Success! Full Analysis:");
     console.log(JSON.stringify(analysis, null, 2));
+    console.log(`[PrivacyLens] Total analysis time: ${end - start}ms`);
   } catch (err) {
     console.error("Test failed:");
     console.error(err);
