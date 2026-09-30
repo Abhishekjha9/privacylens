@@ -13,13 +13,16 @@ const CATEGORIES: CategoryType[] = [
   "legal",
 ];
 
-export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
-  const categoriesMap = new Map<CategoryType, ChunkFinding[]>();
+// Extended ChunkFinding with source traceability
+type AnnotatedFinding = ChunkFinding & { sourceDocument?: string; sourceUrl?: string };
+
+export function buildPolicyAnalysis(findings: AnnotatedFinding[], documentCount: number = 1): PolicyAnalysis {
+  const categoriesMap = new Map<CategoryType, AnnotatedFinding[]>();
   
   CATEGORIES.forEach(cat => categoriesMap.set(cat, []));
 
   // 1. Deduplicate findings deterministically
-  const uniqueFindings: ChunkFinding[] = [];
+  const uniqueFindings: AnnotatedFinding[] = [];
   const seen = new Set<string>();
   
   for (const f of findings) {
@@ -27,7 +30,7 @@ export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
     const normTitle = f.title.toLowerCase().trim();
     const normEvidence = f.evidence.toLowerCase().trim();
     
-    // Create a unique key for deduplication
+    // Unique key: category + title + evidence
     const key = `${normCategory}::${normTitle}::${normEvidence}`;
     
     if (!seen.has(key)) {
@@ -50,6 +53,9 @@ export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
   
   let overallHigh = 0;
   let overallMedium = 0;
+  const highCategories: string[] = [];
+  const mediumCategories: string[] = [];
+  const lowCategories: string[] = [];
 
   for (const [cat, catFindings] of categoriesMap.entries()) {
     if (catFindings.length === 0) {
@@ -62,19 +68,22 @@ export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
       continue;
     }
 
-    // Determine category risk deterministically: highest severity of findings
+    // Category risk: highest severity among findings (deterministic)
     let catRisk: RiskLevel = "EXPECTED";
     if (catFindings.some(f => f.severity === "HIGH")) {
       catRisk = "HIGH";
       overallHigh++;
+      highCategories.push(formatCategoryName(cat));
     } else if (catFindings.some(f => f.severity === "MEDIUM")) {
       catRisk = "MEDIUM";
       overallMedium++;
+      mediumCategories.push(formatCategoryName(cat));
     } else if (catFindings.some(f => f.severity === "LOW")) {
       catRisk = "LOW";
+      lowCategories.push(formatCategoryName(cat));
     }
 
-    const summary = buildCategorySummary(cat, catRisk, catFindings);
+    const summary = buildCategorySummary(catRisk, catFindings);
 
     categories.push({
       category: cat,
@@ -84,31 +93,61 @@ export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
         title: f.title,
         explanation: f.explanation,
         evidence: f.evidence,
-        severity: f.severity
+        severity: f.severity,
+        ...(f.sourceDocument ? { sourceDocument: f.sourceDocument } : {}),
+        ...(f.sourceUrl ? { sourceUrl: f.sourceUrl } : {}),
       }))
     });
 
-    // 3. Extract important clauses (HIGH severity items)
-    catFindings.filter(f => f.severity === "HIGH").forEach(f => {
+    // Important clauses: HIGH and MEDIUM severity items
+    catFindings.filter(f => f.severity === "HIGH" || f.severity === "MEDIUM").forEach(f => {
       importantClauses.push({
         title: f.title,
         category: cat,
         severity: f.severity,
         simpleExplanation: f.explanation,
-        evidence: f.evidence
+        evidence: f.evidence,
+        ...(f.sourceDocument ? { sourceDocument: f.sourceDocument } : {}),
+        ...(f.sourceUrl ? { sourceUrl: f.sourceUrl } : {}),
       });
     });
   }
 
-  // 4. Determine overall risk deterministically
-  let overallRisk: RiskLevel = "LOW";
-  if (overallHigh > 0) overallRisk = "HIGH";
-  else if (overallMedium > 2) overallRisk = "MEDIUM";
-  else if (categories.every(c => c.risk === "NOT_FOUND" || c.risk === "EXPECTED") && categories.some(c => c.risk === "EXPECTED")) {
-    overallRisk = "EXPECTED";
+  // Add LOW severity items to importantClauses, but at the end
+  for (const [cat, catFindings] of categoriesMap.entries()) {
+    catFindings.filter(f => f.severity === "LOW").forEach(f => {
+      importantClauses.push({
+        title: f.title,
+        category: cat,
+        severity: f.severity,
+        simpleExplanation: f.explanation,
+        evidence: f.evidence,
+        ...(f.sourceDocument ? { sourceDocument: f.sourceDocument } : {}),
+        ...(f.sourceUrl ? { sourceUrl: f.sourceUrl } : {}),
+      });
+    });
   }
 
-  const overallSummary = buildOverallSummary(overallRisk, overallHigh, importantClauses.length);
+  // 4. Overall risk (deterministic)
+  let overallRisk: RiskLevel = "LOW";
+  if (overallHigh > 0) overallRisk = "HIGH";
+  else if (overallMedium > 0) overallRisk = "MEDIUM"; // Based on prompt: "Any MEDIUM = MEDIUM" conceptually, actually it says "We identified several...". Wait, "Any MEDIUM = MEDIUM" is fine for overall risk.
+  else if (
+    categories.every(c => c.risk === "NOT_FOUND" || c.risk === "EXPECTED") &&
+    categories.some(c => c.risk === "EXPECTED")
+  ) {
+    // Actually the user said "LOW" if there are no meaningful concerns. "EXPECTED" should not be the overall verdict.
+    overallRisk = "LOW";
+  }
+
+  // 5. Build deterministic explanation from actual findings (no AI)
+  const overallSummary = buildOverallSummary(
+    overallRisk,
+    highCategories,
+    mediumCategories,
+    lowCategories,
+    documentCount
+  );
 
   return {
     overallRisk,
@@ -118,25 +157,51 @@ export function buildPolicyAnalysis(findings: ChunkFinding[]): PolicyAnalysis {
   };
 }
 
-function buildCategorySummary(cat: CategoryType, risk: RiskLevel, findings: ChunkFinding[]): string {
+function formatCategoryName(cat: string): string {
+  return cat.split("_").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function buildCategorySummary(risk: RiskLevel, findings: AnnotatedFinding[]): string {
   if (findings.length === 1) return findings[0].explanation;
   
-  // Create a useful summary based on the actual findings
   const highMedium = findings.filter(f => f.severity === "HIGH" || f.severity === "MEDIUM");
-  
   if (highMedium.length > 0) {
     return highMedium.map(f => f.explanation).join(" ");
   }
-
   return findings.map(f => f.explanation).join(" ");
 }
 
-function buildOverallSummary(risk: RiskLevel, highCount: number, clauseCount: number): string {
-  if (risk === "HIGH") {
-    return `This policy contains ${highCount} high-risk categories and ${clauseCount} important clauses that require your attention.`;
+function buildOverallSummary(
+  risk: RiskLevel,
+  highCategories: string[],
+  mediumCategories: string[],
+  lowCategories: string[],
+  documentCount: number
+): string {
+  let docContext = "";
+  if (documentCount > 1) {
+    docContext = `Across ${documentCount} analyzed documents, `;
+  } else {
+    docContext = `Based on the analyzed document, `;
   }
+
+  if (risk === "LOW") {
+    return `${docContext}no significant privacy concerns were identified.`;
+  }
+
+  const allConcerns = Array.from(new Set([...highCategories, ...mediumCategories, ...lowCategories]));
+  const formattedConcerns = allConcerns.slice(0, 3).map(c => c.toLowerCase()).join(", ").replace(/, ([^,]*)$/, ' and $1');
+
   if (risk === "MEDIUM") {
-    return `This policy contains standard data practices but includes some medium-risk clauses regarding tracking or data usage.`;
+    if (formattedConcerns) {
+      return `${docContext}we identified some privacy practices that deserve attention, particularly regarding ${formattedConcerns}.`;
+    }
+    return `${docContext}we identified several privacy practices that deserve attention.`;
   }
-  return `This policy appears to have minimal risk indicators based on explicit statements.`;
+
+  // HIGH
+  if (formattedConcerns) {
+    return `${docContext}several significant privacy concerns were identified, including issues with ${formattedConcerns}.`;
+  }
+  return `${docContext}several significant privacy concerns were identified.`;
 }

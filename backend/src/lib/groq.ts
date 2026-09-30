@@ -1,5 +1,6 @@
 import Groq from "groq-sdk";
 import { CHUNK_ANALYSIS_PROMPT, FALLBACK_ANALYSIS_PROMPT } from "./prompts";
+import { globalScheduler } from "./scheduler";
 
 export const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY || "missing_key",
@@ -35,120 +36,49 @@ console.log(`[PrivacyLens] GROQ_MODEL: ${MODEL}`);
 const JSON_SCHEMA = {
   type: "object",
   properties: {
-    categories: {
-      type: "array",
-      items: { type: "string" },
-      minItems: 0,
-      maxItems: 5
-    },
-    severities: {
-      type: "array",
-      items: { type: "string" },
-      minItems: 0,
-      maxItems: 5
-    },
-    titles: {
-      type: "array",
-      items: { type: "string" },
-      minItems: 0,
-      maxItems: 5
-    },
-    explanations: {
-      type: "array",
-      items: { type: "string" },
-      minItems: 0,
-      maxItems: 5
-    },
-    evidence: {
-      type: "array",
-      items: { type: "string" },
-      minItems: 0,
-      maxItems: 5
-    }
+    categories: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 },
+    severities: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 },
+    titles: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 },
+    explanations: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 },
+    evidence: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 }
   },
-  required: [
-    "categories",
-    "severities",
-    "titles",
-    "explanations",
-    "evidence"
-  ],
+  required: ["categories", "severities", "titles", "explanations", "evidence"],
   additionalProperties: false
 };
 
 const ALLOWED_CATEGORIES = [
-  "data_collection",
-  "data_sharing",
-  "tracking",
-  "permissions",
-  "retention",
-  "deletion",
-  "ai_training",
-  "subscription",
-  "user_rights",
-  "security",
-  "legal",
-  "other"
+  "data_collection", "data_sharing", "tracking", "permissions", "retention", 
+  "deletion", "ai_training", "subscription", "user_rights", "security", "legal", "other"
 ];
-
 const ALLOWED_SEVERITIES = ["EXPECTED", "LOW", "MEDIUM", "HIGH"];
 
-/**
- * Parses and validates the parallel-array response from Groq.
- * Returns ChunkFinding[] or throws a descriptive error.
- */
-function parseParallelArrayResponse(
-  parsed: any,
-  chunkIndex: number
-): ChunkFinding[] {
+function mapCategory(cat: string): string {
+  const lower = cat.toLowerCase().trim();
+  if (ALLOWED_CATEGORIES.includes(lower)) return lower;
+  if (lower.includes('cross-border data transfers') || lower.includes('direct marketing')) return 'data_sharing';
+  if (lower.includes('lawful bases for processing')) return 'legal';
+  return 'other';
+}
+
+function parseParallelArrayResponse(parsed: any, chunkIndex: number): ChunkFinding[] {
   const { categories, severities, titles, explanations, evidence } = parsed;
-
-  if (
-    !Array.isArray(categories) ||
-    !Array.isArray(severities) ||
-    !Array.isArray(titles) ||
-    !Array.isArray(explanations) ||
-    !Array.isArray(evidence)
-  ) {
-    throw new Error(
-      `Invalid structured analysis in chunk ${chunkIndex}: one or more properties are not arrays`
-    );
+  if (!Array.isArray(categories) || !Array.isArray(severities) || !Array.isArray(titles) || !Array.isArray(explanations) || !Array.isArray(evidence)) {
+    throw new Error(`Invalid structured analysis in chunk ${chunkIndex}: one or more properties are not arrays`);
   }
-
   const count = categories.length;
-
-  if (
-    severities.length !== count ||
-    titles.length !== count ||
-    explanations.length !== count ||
-    evidence.length !== count
-  ) {
-    throw new Error(
-      `Mismatched finding arrays in chunk ${chunkIndex}: ` +
-      `categories=${categories.length}, severities=${severities.length}, ` +
-      `titles=${titles.length}, explanations=${explanations.length}, evidence=${evidence.length}`
-    );
+  if (severities.length !== count || titles.length !== count || explanations.length !== count || evidence.length !== count) {
+    throw new Error(`Mismatched finding arrays in chunk ${chunkIndex}`);
   }
-
-  if (count > 5) {
-    throw new Error(
-      `Chunk ${chunkIndex} returned ${count} findings (max 5)`
-    );
-  }
+  if (count > 5) throw new Error(`Chunk ${chunkIndex} returned ${count} findings (max 5)`);
 
   const findings: ChunkFinding[] = [];
-
   for (let i = 0; i < count; i++) {
-    const catLower = (categories[i] ?? "").toLowerCase().trim();
+    const catLower = mapCategory(categories[i] ?? "");
     const sevUpper = (severities[i] ?? "").toUpperCase().trim();
     const t = (titles[i] ?? "").trim();
     const expl = (explanations[i] ?? "").trim();
     const ev = (evidence[i] ?? "").trim();
 
-    if (!ALLOWED_CATEGORIES.includes(catLower)) {
-      console.warn(`[PrivacyLens] Chunk ${chunkIndex} index ${i}: invalid category "${catLower}" — skipping`);
-      continue;
-    }
     if (!ALLOWED_SEVERITIES.includes(sevUpper)) {
       console.warn(`[PrivacyLens] Chunk ${chunkIndex} index ${i}: invalid severity "${sevUpper}" — skipping`);
       continue;
@@ -158,44 +88,44 @@ function parseParallelArrayResponse(
       continue;
     }
 
-    findings.push({
-      category: catLower,
-      severity: sevUpper as ChunkFinding["severity"],
-      title: t,
-      explanation: expl,
-      evidence: ev,
-    });
+    findings.push({ category: catLower, severity: sevUpper as ChunkFinding["severity"], title: t, explanation: expl, evidence: ev });
   }
-
   return findings;
 }
 
-/**
- * Calls Groq with the given prompt and schema, retrying once on transient errors.
- */
+function getRetryDelay(error: any): number {
+  const msg = error?.error?.message || error?.message || "";
+  const match = msg.match(/try again in ([\d\.]+)s/i);
+  if (match && match[1]) {
+    return parseFloat(match[1]) * 1000;
+  }
+  return 800;
+}
+
 async function callGroq(
-  prompt: string,
-  chunkIndex: number,
-  totalChunks: number,
-  chunkText: string,
-  label: string
+  prompt: string, chunkIndex: number, totalChunks: number, chunkText: string, label: string, signal?: AbortSignal
 ): Promise<{findings: ChunkFinding[], completionTokens: number, promptTokens: number, totalTokens: number, retryTokens: number, retryCount: number}> {
-  const MAX_TRANSIENT_RETRIES = 1;
+  const MAX_RETRIES = 1;
   let attempt = 0;
   let lastError: any = null;
   let retryTokens = 0;
   let retryCount = 0;
 
-  while (attempt <= MAX_TRANSIENT_RETRIES) {
+  const estimatedTokens = Math.ceil(prompt.length / 4) + 150; // +150 for completion buffer
+
+  while (attempt <= MAX_RETRIES) {
+    if (signal?.aborted) throw new Error("Cancelled");
     attempt++;
+    
+    await globalScheduler.acquire(estimatedTokens);
+    if (signal?.aborted) {
+      globalScheduler.release(0, estimatedTokens);
+      throw new Error("Cancelled");
+    }
+
     try {
-      console.log(
-        `\n[PrivacyLens] --- GROQ REQUEST (${label}, attempt ${attempt}) ---`
-      );
-      console.log(`- Model: ${MODEL}`);
-      console.log(`- Chunk: ${chunkIndex}/${totalChunks}`);
-      console.log(`- Chars: ${chunkText.length}`);
-      console.log(`- Prompt chars: ${prompt.length}`);
+      console.log(`\n[PrivacyLens] --- GROQ REQUEST (${label}, attempt ${attempt}) ---`);
+      console.log(`- Chunk: ${chunkIndex}/${totalChunks} (Prompt: ${prompt.length} chars, Est Tokens: ${estimatedTokens})`);
 
       const chatCompletion = await groq.chat.completions.create(
         {
@@ -206,77 +136,45 @@ async function callGroq(
           // @ts-ignore
           include_reasoning: false,
           reasoning_effort: "low",
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: "privacy_policy_analysis",
-              strict: true,
-              schema: JSON_SCHEMA,
-            },
-          },
+          response_format: { type: "json_schema", json_schema: { name: "privacy_policy_analysis", strict: true, schema: JSON_SCHEMA } },
         },
-        { timeout: 30000 }
+        // @ts-ignore
+        { timeout: 30000, signal }
       );
-
-      const responseContent = chatCompletion.choices[0]?.message?.content;
 
       const completionTokens = chatCompletion.usage?.completion_tokens ?? 0;
       const promptTokens = chatCompletion.usage?.prompt_tokens ?? 0;
       const totalTokens = chatCompletion.usage?.total_tokens ?? 0;
-      console.log(
-        `[PrivacyLens] Finish: ${chatCompletion.choices[0]?.finish_reason}, ` +
-        `tokens: ${totalTokens} (prompt: ${promptTokens}, comp: ${completionTokens})`
-      );
+      
+      globalScheduler.release(totalTokens, estimatedTokens);
 
-      if (!responseContent) {
-        throw new Error("Groq returned an empty response");
-      }
+      const responseContent = chatCompletion.choices[0]?.message?.content;
+      if (!responseContent) throw new Error("Groq returned an empty response");
 
       const parsed = JSON.parse(responseContent);
       const findings = parseParallelArrayResponse(parsed, chunkIndex);
       return { findings, completionTokens, promptTokens, totalTokens, retryTokens, retryCount };
     } catch (error: any) {
+      globalScheduler.release(estimatedTokens, estimatedTokens); // release roughly estimated since actual unknown
       lastError = error;
+      if (signal?.aborted) throw new Error("Cancelled");
 
-      const isTransient =
-        error.status === 429 ||
-        error.status === 500 ||
-        error.status === 502 ||
-        error.status === 503 ||
-        error.name === "APIConnectionError" ||
-        error.name === "APIConnectionTimeoutError" ||
-        error.name === "AbortError";
+      const isRateLimit = error.status === 429;
+      const isTransient = isRateLimit || error.status === 500 || error.status === 502 || error.status === 503 || error.name === "APIConnectionError" || error.name === "APIConnectionTimeoutError";
 
-      if (!isTransient) {
-        // Non-transient — surface immediately so caller can decide to retry with fallback
-        throw error;
-      }
-
-      if (attempt > MAX_TRANSIENT_RETRIES) {
-        throw error;
-      }
+      if (!isTransient || attempt > MAX_RETRIES) throw error;
 
       retryCount++;
-      console.warn(
-        `[PrivacyLens] Chunk ${chunkIndex} transient error (attempt ${attempt}), retrying in 800ms...`
-      );
-      await new Promise((res) => setTimeout(res, 800));
+      const delay = isRateLimit ? getRetryDelay(error) : 800;
+      console.warn(`[PrivacyLens] Chunk ${chunkIndex} error (${error.status}), retrying in ${delay}ms...`);
+      await new Promise(res => setTimeout(res, delay));
     }
   }
-
   throw lastError;
 }
 
-/**
- * Determines whether an error is a Groq schema-generation / JSON-validation failure.
- */
 function isSchemaGenerationFailure(error: any): boolean {
-  return (
-    error?.status === 400 &&
-    (error?.error?.code === "json_validate_failed" ||
-      (typeof error?.error?.message === "string" &&
-        error.error.message.toLowerCase().includes("validate")))
-  );
+  return error?.status === 400 && (error?.error?.code === "json_validate_failed" || (typeof error?.error?.message === "string" && error.error.message.toLowerCase().includes("validate")));
 }
 
 /**
@@ -289,7 +187,8 @@ export async function analyzeChunk(
   chunkText: string,
   policyContext: string,
   chunkIndex: number = 1,
-  totalChunks: number = 1
+  totalChunks: number = 1,
+  signal?: AbortSignal
 ): Promise<ChunkAnalysisResult> {
   if (!process.env.GROQ_API_KEY) {
     throw new Error("GROQ_API_KEY is missing. Please set it in backend/.env");
@@ -310,7 +209,8 @@ export async function analyzeChunk(
       chunkIndex,
       totalChunks,
       chunkText,
-      "primary"
+      "primary",
+      signal
     );
     const durationMs = Date.now() - startTime;
     return { 
@@ -327,6 +227,7 @@ export async function analyzeChunk(
       finalPromptChars: mainPrompt.length
     };
   } catch (primaryError: any) {
+    if (signal?.aborted) throw primaryError;
     if (isSchemaGenerationFailure(primaryError)) {
       console.error(
         `[PrivacyLens] Chunk ${chunkIndex} schema validation failed (code: ${primaryError?.error?.code})`
@@ -353,7 +254,8 @@ export async function analyzeChunk(
       chunkIndex,
       totalChunks,
       chunkText,
-      "fallback"
+      "fallback",
+      signal
     );
     const durationMs = Date.now() - startTime;
     return { 
@@ -370,6 +272,7 @@ export async function analyzeChunk(
       finalPromptChars: fallbackPrompt.length
     };
   } catch (fallbackError: any) {
+    if (signal?.aborted) throw fallbackError;
     const durationMs = Date.now() - startTime;
     return { 
       findings: [], 

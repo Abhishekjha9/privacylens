@@ -2,10 +2,49 @@ import { PolicyDocument, PolicyAnalysis } from "../types/analysis";
 import { analyzeChunk, ChunkFinding } from "./groq";
 import { buildPolicyAnalysis } from "./risk-engine";
 
+export function getRelevanceFilteredText(text: string, docType: string): string {
+  // If text is short, just return it
+  if (text.length < 5000) return text;
+  
+  let keywords: RegExp;
+  if (docType === 'privacy') {
+    // Focus heavily on data practices, sharing, third parties, AI, rights
+    keywords = /\b(personal|collect|data|sharing|third part|advertis|track|cookie|retention|delet|ai|machine learning|train|location|sensitive|children|rights|security)\b/i;
+  } else if (docType === 'terms') {
+    // Focus on terms, subscription, rights, liability, data
+    keywords = /\b(subscription|payment|terminat|rights|obligations|restrict|liability|warrant|indemnify|data|account)\b/i;
+  } else if (docType === 'cookie') {
+    keywords = /\b(cookie|track|analytic|advertis|third part|duration|opt-out|consent)\b/i;
+  } else {
+    return text;
+  }
+
+  // Split by double newline or common paragraph separators to get true paragraphs
+  const paragraphs = text.split(/\n\s*\n|\r\n\r\n/);
+  if (paragraphs.length < 5) return text;
+
+  const keep = new Set<number>();
+  for (let i = 0; i < paragraphs.length; i++) {
+    if (keywords.test(paragraphs[i])) {
+      // Keep this and adjacent
+      keep.add(Math.max(0, i - 1));
+      keep.add(i);
+      keep.add(Math.min(paragraphs.length - 1, i + 1));
+    }
+  }
+
+  // Always keep first 3 and last 3 paragraphs (intro/outro)
+  for (let i = 0; i < 3 && i < paragraphs.length; i++) keep.add(i);
+  for (let i = paragraphs.length - 3; i < paragraphs.length; i++) keep.add(i);
+
+  const result = paragraphs.filter((_, i) => keep.has(i)).join('\n\n');
+  return result.length < 1000 ? text : result;
+}
+
 export function chunkText(text: string): string[] {
-  const MAX_CHUNKS = 9;
+  const MAX_CHUNKS = 5;
   let chunkSize = 6000;
-  let overlap = 500;
+  let overlap = 300;
   
   let chunks: string[] = [];
   let i = 0;
@@ -26,7 +65,7 @@ export function chunkText(text: string): string[] {
   
   if (chunks.length > 1 && chunks[chunks.length - 1].length < 1000) {
     const last = chunks.pop()!;
-    chunks[chunks.length - 1] += "\\n" + last;
+    chunks[chunks.length - 1] += "\n" + last;
   }
   
   return chunks.slice(0, MAX_CHUNKS);

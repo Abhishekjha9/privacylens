@@ -16,6 +16,10 @@ export interface Finding {
   explanation: string;
   evidence: string;
   severity: RiskLevel;
+  /** Which source document this finding came from (multi-doc mode) */
+  sourceDocument?: string;
+  /** URL of the source document for evidence navigation */
+  sourceUrl?: string;
 }
 
 export interface CategoryAnalysis {
@@ -31,6 +35,19 @@ export interface ImportantClause {
   severity: RiskLevel;
   simpleExplanation: string;
   evidence: string;
+  sourceDocument?: string;
+  sourceUrl?: string;
+}
+
+export interface AnalyzedDocumentResult {
+  type: string;
+  url: string;
+  title: string;
+  source: string;
+  confidence: string;
+  success: boolean;
+  error?: string;
+  findingsCount?: number;
 }
 
 export interface PolicyAnalysis {
@@ -38,6 +55,7 @@ export interface PolicyAnalysis {
   summary: string;
   categories: CategoryAnalysis[];
   importantClauses: ImportantClause[];
+  documentsAnalyzed?: AnalyzedDocumentResult[];
 }
 
 export interface PolicyDocument {
