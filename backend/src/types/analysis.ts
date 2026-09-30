@@ -45,8 +45,11 @@ export interface AnalyzedDocumentResult {
   title: string;
   source: string;
   confidence: string;
-  success: boolean;
-  error?: string;
+  status: "complete" | "partial" | "failed";
+  chunksTotal: number;
+  chunksSucceeded: number;
+  chunksFailed: number;
+  errors: { code: string; chunk: number }[];
   findingsCount?: number;
 }
 

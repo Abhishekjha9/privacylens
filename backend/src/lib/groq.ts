@@ -1,12 +1,12 @@
 import Groq from "groq-sdk";
-import { CHUNK_ANALYSIS_PROMPT, FALLBACK_ANALYSIS_PROMPT } from "./prompts";
+import { CHUNK_ANALYSIS_PROMPT } from "./prompts";
 import { globalScheduler } from "./scheduler";
 
 export const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY || "missing_key",
 });
 
-export const MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
+export const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
 
 export interface ChunkFinding {
   category: string;
@@ -33,21 +33,33 @@ export interface ChunkAnalysisResult {
 console.log(`[PrivacyLens] GROQ_API_KEY loaded: ${!!process.env.GROQ_API_KEY}`);
 console.log(`[PrivacyLens] GROQ_MODEL: ${MODEL}`);
 
+// ── JSON Schema (array-of-objects — no correlated-array mismatch possible) ───
 const JSON_SCHEMA = {
   type: "object",
   properties: {
-    categories: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 },
-    severities: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 },
-    titles: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 },
-    explanations: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 },
-    evidence: { type: "array", items: { type: "string" }, minItems: 0, maxItems: 5 }
+    findings: {
+      type: "array",
+      maxItems: 5,
+      items: {
+        type: "object",
+        properties: {
+          category: { type: "string" },
+          severity: { type: "string" },
+          title: { type: "string" },
+          explanation: { type: "string" },
+          evidence: { type: "string" }
+        },
+        required: ["category", "severity", "title", "explanation", "evidence"],
+        additionalProperties: false
+      }
+    }
   },
-  required: ["categories", "severities", "titles", "explanations", "evidence"],
+  required: ["findings"],
   additionalProperties: false
 };
 
 const ALLOWED_CATEGORIES = [
-  "data_collection", "data_sharing", "tracking", "permissions", "retention", 
+  "data_collection", "data_sharing", "tracking", "permissions", "retention",
   "deletion", "ai_training", "subscription", "user_rights", "security", "legal", "other"
 ];
 const ALLOWED_SEVERITIES = ["EXPECTED", "LOW", "MEDIUM", "HIGH"];
@@ -55,140 +67,305 @@ const ALLOWED_SEVERITIES = ["EXPECTED", "LOW", "MEDIUM", "HIGH"];
 function mapCategory(cat: string): string {
   const lower = cat.toLowerCase().trim();
   if (ALLOWED_CATEGORIES.includes(lower)) return lower;
-  if (lower.includes('cross-border data transfers') || lower.includes('direct marketing')) return 'data_sharing';
-  if (lower.includes('lawful bases for processing')) return 'legal';
+  if (lower.includes('cross-border') || lower.includes('direct marketing')) return 'data_sharing';
+  if (lower.includes('lawful bases') || lower.includes('legal basis')) return 'legal';
   return 'other';
 }
 
-function parseParallelArrayResponse(parsed: any, chunkIndex: number): ChunkFinding[] {
-  const { categories, severities, titles, explanations, evidence } = parsed;
-  if (!Array.isArray(categories) || !Array.isArray(severities) || !Array.isArray(titles) || !Array.isArray(explanations) || !Array.isArray(evidence)) {
-    throw new Error(`Invalid structured analysis in chunk ${chunkIndex}: one or more properties are not arrays`);
+/**
+ * Parse the array-of-objects response from Groq.
+ * Each finding is self-contained — no correlated-array mismatch possible.
+ */
+function parseFindingsResponse(parsed: any, chunkIndex: number): ChunkFinding[] {
+  if (!Array.isArray(parsed?.findings)) {
+    throw new Error(`LOCAL_VALIDATION_ERROR chunk=${chunkIndex}: 'findings' is not an array`);
   }
-  const count = categories.length;
-  if (severities.length !== count || titles.length !== count || explanations.length !== count || evidence.length !== count) {
-    throw new Error(`Mismatched finding arrays in chunk ${chunkIndex}`);
-  }
-  if (count > 5) throw new Error(`Chunk ${chunkIndex} returned ${count} findings (max 5)`);
 
   const findings: ChunkFinding[] = [];
-  for (let i = 0; i < count; i++) {
-    const catLower = mapCategory(categories[i] ?? "");
-    const sevUpper = (severities[i] ?? "").toUpperCase().trim();
-    const t = (titles[i] ?? "").trim();
-    const expl = (explanations[i] ?? "").trim();
-    const ev = (evidence[i] ?? "").trim();
+
+  for (let i = 0; i < parsed.findings.length; i++) {
+    const f = parsed.findings[i];
+    if (!f || typeof f !== "object") {
+      console.warn(`[PrivacyLens] LOCAL_VALIDATION_ERROR chunk=${chunkIndex} index=${i}: not an object — skipping`);
+      continue;
+    }
+
+    const catLower = mapCategory(f.category ?? "");
+    const sevUpper = (f.severity ?? "").toUpperCase().trim();
+    const t = (f.title ?? "").trim();
+    const expl = (f.explanation ?? "").trim();
+    const ev = (f.evidence ?? "").trim();
 
     if (!ALLOWED_SEVERITIES.includes(sevUpper)) {
-      console.warn(`[PrivacyLens] Chunk ${chunkIndex} index ${i}: invalid severity "${sevUpper}" — skipping`);
+      console.warn(`[PrivacyLens] LOCAL_VALIDATION_ERROR chunk=${chunkIndex} index=${i}: invalid severity "${sevUpper}" — skipping`);
       continue;
     }
     if (!t || !expl || !ev) {
-      console.warn(`[PrivacyLens] Chunk ${chunkIndex} index ${i}: missing required fields — skipping`);
+      console.warn(`[PrivacyLens] LOCAL_VALIDATION_ERROR chunk=${chunkIndex} index=${i}: missing required fields — skipping`);
       continue;
     }
 
     findings.push({ category: catLower, severity: sevUpper as ChunkFinding["severity"], title: t, explanation: expl, evidence: ev });
   }
+
   return findings;
 }
 
-function getRetryDelay(error: any): number {
+function getRetryDelay(headers: Headers | undefined, error: any): number {
+  // Prefer server-provided Retry-After header
+  const retryAfter = headers?.get("retry-after");
+  if (retryAfter) {
+    const seconds = parseFloat(retryAfter);
+    if (!isNaN(seconds)) return Math.ceil(seconds * 1000);
+  }
+  // Fall back to parsing the error message
   const msg = error?.error?.message || error?.message || "";
   const match = msg.match(/try again in ([\d\.]+)s/i);
-  if (match && match[1]) {
-    return parseFloat(match[1]) * 1000;
-  }
+  if (match && match[1]) return parseFloat(match[1]) * 1000;
   return 800;
 }
 
+// ── Internal error types ──────────────────────────────────────────────────────
+class GroqHttpError extends Error {
+  constructor(public readonly status: number, public readonly body: string) {
+    super(`GROQ_HTTP_ERROR status=${status}`);
+  }
+}
+class GroqRateLimitError extends Error {
+  constructor(public readonly retryAfterMs: number, public readonly body: string) {
+    super(`GROQ_RATE_LIMIT_ERROR retryAfter=${retryAfterMs}ms`);
+  }
+}
+
+/**
+ * callGroq — fires one Groq HTTP request.
+ *
+ * Acquire/release contract:
+ *   1. acquire() before the fetch
+ *   2. release() EXACTLY ONCE in the finally block of the fetch
+ *   3. LOCAL parse/validation errors happen AFTER release — they are never
+ *      classified as Groq HTTP errors
+ */
 async function callGroq(
-  prompt: string, chunkIndex: number, totalChunks: number, chunkText: string, label: string, signal?: AbortSignal
-): Promise<{findings: ChunkFinding[], completionTokens: number, promptTokens: number, totalTokens: number, retryTokens: number, retryCount: number}> {
+  prompt: string,
+  chunkIndex: number,
+  totalChunks: number,
+  label: string,
+  docTag: string,
+  signal?: AbortSignal,
+  maxWaitMs?: number
+): Promise<{ findings: ChunkFinding[], completionTokens: number, promptTokens: number, totalTokens: number, retryTokens: number, retryCount: number }> {
   const MAX_RETRIES = 1;
   let attempt = 0;
   let lastError: any = null;
   let retryTokens = 0;
   let retryCount = 0;
 
-  const estimatedTokens = Math.ceil(prompt.length / 4) + 150; // +150 for completion buffer
+  const estimatedTokens = Math.ceil(prompt.length / 4) + 100; // +100 for compact completion
+  const startTime = Date.now();
 
   while (attempt <= MAX_RETRIES) {
     if (signal?.aborted) throw new Error("Cancelled");
     attempt++;
-    
-    await globalScheduler.acquire(estimatedTokens);
+
+    console.log(`[PrivacyLens] GROQ REQUEST START
+  doc=${docTag}
+  chunk=${chunkIndex}
+  estimatedInputTokens=${estimatedTokens}`);
+
+    const leaseId = await globalScheduler.acquire(estimatedTokens, signal, maxWaitMs, docTag, chunkIndex);
+
     if (signal?.aborted) {
-      globalScheduler.release(0, estimatedTokens);
+      globalScheduler.releaseError(leaseId, estimatedTokens);
       throw new Error("Cancelled");
     }
 
-    try {
-      console.log(`\n[PrivacyLens] --- GROQ REQUEST (${label}, attempt ${attempt}) ---`);
-      console.log(`- Chunk: ${chunkIndex}/${totalChunks} (Prompt: ${prompt.length} chars, Est Tokens: ${estimatedTokens})`);
+    // ── Groq HTTP request ─────────────────────────────────────────────────────
+    // Everything inside this try/finally is the "acquired" window.
+    // release() is called EXACTLY ONCE in the finally block.
+    // Local parse/validation runs OUTSIDE this try/finally.
+    let rawResponse: string | null = null;
+    let completionTokens = 0;
+    let promptTokens = 0;
+    let totalTokens = 0;
+    let httpSuccess = false;
+    let responseHeaders: Headers | undefined;
 
+    console.log(`[PrivacyLens] ${docTag} CHUNK ${chunkIndex}/${totalChunks} GROQ START`);
+    console.log(`\n[PrivacyLens] --- GROQ REQUEST (${label}, attempt ${attempt}) ---`);
+    console.log(`- Chunk: ${chunkIndex}/${totalChunks} (Prompt: ${prompt.length} chars, Est Tokens: ${estimatedTokens})`);
+    console.log(`- Request: { model: "${MODEL}", temperature: 0.1, max_tokens: 600, schema: "privacy_policy_analysis_v2", strict: true }`);
+
+    let httpError: GroqHttpError | GroqRateLimitError | Error | null = null;
+
+    try {
       const chatCompletion = await groq.chat.completions.create(
         {
           messages: [{ role: "user", content: prompt }],
           model: MODEL,
           temperature: 0.1,
-          max_tokens: 1000,
+          max_tokens: 600,
           // @ts-ignore
           include_reasoning: false,
           reasoning_effort: "low",
-          response_format: { type: "json_schema", json_schema: { name: "privacy_policy_analysis", strict: true, schema: JSON_SCHEMA } },
+          response_format: {
+            type: "json_schema",
+            json_schema: { name: "privacy_policy_analysis_v2", strict: true, schema: JSON_SCHEMA }
+          },
         },
         // @ts-ignore
         { timeout: 30000, signal }
       );
 
-      const completionTokens = chatCompletion.usage?.completion_tokens ?? 0;
-      const promptTokens = chatCompletion.usage?.prompt_tokens ?? 0;
-      const totalTokens = chatCompletion.usage?.total_tokens ?? 0;
-      
-      globalScheduler.release(totalTokens, estimatedTokens);
+      completionTokens = chatCompletion.usage?.completion_tokens ?? 0;
+      promptTokens = chatCompletion.usage?.prompt_tokens ?? 0;
+      totalTokens = chatCompletion.usage?.total_tokens ?? 0;
+      rawResponse = chatCompletion.choices[0]?.message?.content ?? null;
+      httpSuccess = true;
 
-      const responseContent = chatCompletion.choices[0]?.message?.content;
-      if (!responseContent) throw new Error("Groq returned an empty response");
+      // Log rate-limit headers from a successful response for observability
+      try {
+        const raw = (chatCompletion as any)._response ?? (chatCompletion as any).response;
+        if (raw?.headers) {
+          responseHeaders = raw.headers;
+          const limit = raw.headers.get?.("x-ratelimit-limit-tokens") || raw.headers.get?.("X-RateLimit-Limit-Tokens") || "unknown";
+          const remaining = raw.headers.get?.("x-ratelimit-remaining-tokens") || raw.headers.get?.("X-RateLimit-Remaining-Tokens") || "unknown";
+          const reset = raw.headers.get?.("x-ratelimit-reset-tokens") || raw.headers.get?.("X-RateLimit-Reset-Tokens") || "unknown";
+          
+          console.log(`[PrivacyLens] GROQ LIMITS
+  limitTokens=${limit}
+  remainingTokens=${remaining}
+  resetTokens=${reset}`);
+        }
+      } catch { /* headers not available */ }
 
-      const parsed = JSON.parse(responseContent);
-      const findings = parseParallelArrayResponse(parsed, chunkIndex);
-      return { findings, completionTokens, promptTokens, totalTokens, retryTokens, retryCount };
-    } catch (error: any) {
-      globalScheduler.release(estimatedTokens, estimatedTokens); // release roughly estimated since actual unknown
-      lastError = error;
+    } catch (fetchErr: any) {
+      const status = fetchErr?.status ?? fetchErr?.response?.status;
+      let body: string;
+      try { body = JSON.stringify(fetchErr?.error ?? fetchErr?.message ?? fetchErr); }
+      catch { body = String(fetchErr); }
+
+      if (status === 429) {
+        const retryMs = getRetryDelay(responseHeaders, fetchErr);
+        httpError = new GroqRateLimitError(retryMs, body);
+        console.error(`[PrivacyLens] GROQ REQUEST ERROR
+  doc=${docTag}
+  chunk=${chunkIndex}
+  errorCode=429
+  status=429
+  retryAfter=${retryMs}
+  remainingTPM=unknown`);
+      } else if (status === 400 && fetchErr?.error?.code === "json_validate_failed") {
+        // Schema generation failure from Groq itself
+        httpError = new GroqHttpError(400, body);
+        console.error(`[PrivacyLens] GROQ REQUEST ERROR
+  doc=${docTag}
+  chunk=${chunkIndex}
+  errorCode=SCHEMA
+  status=400
+  retryAfter=null
+  remainingTPM=unknown`);
+      } else if (status) {
+        httpError = new GroqHttpError(status, body);
+        console.error(`[PrivacyLens] GROQ REQUEST ERROR
+  doc=${docTag}
+  chunk=${chunkIndex}
+  errorCode=HTTP
+  status=${status}
+  retryAfter=null
+  remainingTPM=unknown`);
+      } else {
+        httpError = fetchErr;
+        console.error(`[PrivacyLens] GROQ REQUEST ERROR
+  doc=${docTag}
+  chunk=${chunkIndex}
+  errorCode=CONNECTION
+  status=unknown
+  retryAfter=null
+  remainingTPM=unknown`);
+      }
+    } finally {
+      // ── ONE release per acquire, always ───────────────────────────────────
+      globalScheduler.release(leaseId, httpSuccess ? totalTokens : estimatedTokens, estimatedTokens);
+      if (httpSuccess) {
+        console.log(`[PrivacyLens] GROQ REQUEST SUCCESS
+  doc=${docTag}
+  chunk=${chunkIndex}
+  promptTokens=${promptTokens}
+  completionTokens=${completionTokens}
+  totalTokens=${totalTokens}
+  latencyMs=${Date.now() - startTime}`);
+      }
+    }
+
+    // ── If HTTP failed, decide whether to retry ───────────────────────────────
+    if (httpError !== null) {
+      lastError = httpError;
+
       if (signal?.aborted) throw new Error("Cancelled");
 
-      const isRateLimit = error.status === 429;
-      const isTransient = isRateLimit || error.status === 500 || error.status === 502 || error.status === 503 || error.name === "APIConnectionError" || error.name === "APIConnectionTimeoutError";
+      const isRetryable =
+        httpError instanceof GroqRateLimitError ||
+        (httpError instanceof GroqHttpError && (httpError.status === 500 || httpError.status === 502 || httpError.status === 503)) ||
+        (!(httpError instanceof GroqHttpError) && (httpError as any)?.name === "APIConnectionError");
 
-      if (!isTransient || attempt > MAX_RETRIES) throw error;
+      if (!isRetryable || attempt > MAX_RETRIES) throw httpError;
 
       retryCount++;
-      const delay = isRateLimit ? getRetryDelay(error) : 800;
-      console.warn(`[PrivacyLens] Chunk ${chunkIndex} error (${error.status}), retrying in ${delay}ms...`);
+      const delay = httpError instanceof GroqRateLimitError ? httpError.retryAfterMs : 800;
+      console.warn(`[PrivacyLens] Chunk ${chunkIndex} retrying in ${delay}ms...`);
       await new Promise(res => setTimeout(res, delay));
+      continue;
     }
+
+    // ── HTTP succeeded — now do LOCAL parse/validation ────────────────────────
+    // Any error here is a LOCAL error, NOT a Groq HTTP error.
+    if (!rawResponse) {
+      console.warn(`[PrivacyLens] LOCAL_PARSE_ERROR chunk=${chunkIndex}/${totalChunks}: empty response body`);
+      // Treat empty response as a non-retryable local failure — return empty findings
+      return { findings: [], completionTokens, promptTokens, totalTokens, retryTokens, retryCount };
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(rawResponse);
+    } catch (parseErr) {
+      console.error(`[PrivacyLens] LOCAL_PARSE_ERROR chunk=${chunkIndex}/${totalChunks}: JSON.parse failed — responseLength=${rawResponse.length}`);
+      return { findings: [], completionTokens, promptTokens, totalTokens, retryTokens, retryCount };
+    }
+
+    let findings: ChunkFinding[];
+    try {
+      findings = parseFindingsResponse(parsed, chunkIndex);
+    } catch (valErr: any) {
+      // Diagnostic: log the shape of the parsed object, not the raw content
+      const shape = {
+        hasFindingsKey: "findings" in parsed,
+        findingsIsArray: Array.isArray(parsed?.findings),
+        findingsLength: Array.isArray(parsed?.findings) ? parsed.findings.length : "n/a",
+        responseContentLength: rawResponse.length,
+      };
+      console.error(`[PrivacyLens] LOCAL_VALIDATION_ERROR chunk=${chunkIndex}/${totalChunks}: ${valErr.message}`, JSON.stringify(shape));
+      return { findings: [], completionTokens, promptTokens, totalTokens, retryTokens, retryCount };
+    }
+
+    return { findings, completionTokens, promptTokens, totalTokens, retryTokens, retryCount };
   }
+
   throw lastError;
 }
 
-function isSchemaGenerationFailure(error: any): boolean {
-  return error?.status === 400 && (error?.error?.code === "json_validate_failed" || (typeof error?.error?.message === "string" && error.error.message.toLowerCase().includes("validate")));
-}
-
 /**
- * Analyzes one chunk. Tries the main prompt first. If Groq returns a
- * schema-generation 400, retries with the simpler fallback prompt.
- * Returns findings (possibly empty) rather than throwing, so callers
- * can skip a bad chunk and continue.
+ * Analyzes one chunk of a legal/privacy document.
  */
 export async function analyzeChunk(
   chunkText: string,
   policyContext: string,
   chunkIndex: number = 1,
   totalChunks: number = 1,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  docTag: string = "DOC",
+  maxWaitMs?: number
 ): Promise<ChunkAnalysisResult> {
   if (!process.env.GROQ_API_KEY) {
     throw new Error("GROQ_API_KEY is missing. Please set it in backend/.env");
@@ -197,27 +374,26 @@ export async function analyzeChunk(
   const mainPrompt =
     `${CHUNK_ANALYSIS_PROMPT}\n\nDocument Context: ${policyContext}\n\n--- POLICY TEXT START ---\n${chunkText}\n--- POLICY TEXT END ---`;
 
-  console.log(`[PrivacyLens] Chunk ${chunkIndex}/${totalChunks} started`);
+  console.log(`[PrivacyLens] ${docTag} CHUNK ${chunkIndex}/${totalChunks} QUEUED (${chunkText.length} chars)`);
   const startTime = Date.now();
-  let fallbackRetryTokens = 0;
-  let fallbackRetryCount = 0;
 
-  // --- Primary attempt ---
   try {
     const { findings, completionTokens, promptTokens, totalTokens, retryTokens, retryCount } = await callGroq(
       mainPrompt,
       chunkIndex,
       totalChunks,
-      chunkText,
       "primary",
-      signal
+      docTag,
+      signal,
+      maxWaitMs
     );
     const durationMs = Date.now() - startTime;
-    return { 
-      findings, 
-      success: true,
-      promptTokens, 
-      completionTokens, 
+    console.log(`[PrivacyLens] ${docTag} CHUNK ${chunkIndex}/${totalChunks} SUCCESS (${durationMs}ms, ${findings.length} findings, ${totalTokens} tokens)`);
+    return {
+      findings,
+      success: findings.length > 0 || completionTokens > 0,
+      promptTokens,
+      completionTokens,
       totalTokens,
       durationMs,
       retryTokens,
@@ -226,66 +402,15 @@ export async function analyzeChunk(
       policyChunkChars: chunkText.length,
       finalPromptChars: mainPrompt.length
     };
-  } catch (primaryError: any) {
-    if (signal?.aborted) throw primaryError;
-    if (isSchemaGenerationFailure(primaryError)) {
-      console.error(
-        `[PrivacyLens] Chunk ${chunkIndex} schema validation failed (code: ${primaryError?.error?.code})`
-      );
-      console.log(
-        `[PrivacyLens] Retrying chunk ${chunkIndex} with fallback prompt...`
-      );
-    } else {
-      // Not a schema failure — log and re-throw so analyzer can decide
-      console.error(
-        `[PrivacyLens] Chunk ${chunkIndex} non-schema error: status=${primaryError?.status}, name=${primaryError?.name}`
-      );
-      throw primaryError;
-    }
-  }
-
-  // --- Fallback attempt (only reached on schema generation failure) ---
-  const fallbackPrompt =
-    `${FALLBACK_ANALYSIS_PROMPT}\n\n--- POLICY TEXT START ---\n${chunkText}\n--- POLICY TEXT END ---`;
-
-  try {
-    const { findings, completionTokens, promptTokens, totalTokens, retryTokens, retryCount } = await callGroq(
-      fallbackPrompt,
-      chunkIndex,
-      totalChunks,
-      chunkText,
-      "fallback",
-      signal
-    );
-    const durationMs = Date.now() - startTime;
-    return { 
-      findings, 
-      success: true,
-      promptTokens, 
-      completionTokens, 
-      totalTokens,
-      durationMs,
-      retryTokens: retryTokens + fallbackRetryTokens,
-      retryCount: retryCount + fallbackRetryCount + 1, // +1 for the fallback attempt itself
-      staticInstructionsChars: fallbackPrompt.length - chunkText.length,
-      policyChunkChars: chunkText.length,
-      finalPromptChars: fallbackPrompt.length
-    };
-  } catch (fallbackError: any) {
-    if (signal?.aborted) throw fallbackError;
-    const durationMs = Date.now() - startTime;
-    return { 
-      findings: [], 
-      success: false,
-      promptTokens: 0,
-      completionTokens: 0,
-      totalTokens: 0,
-      durationMs,
-      retryTokens: fallbackRetryTokens,
-      retryCount: fallbackRetryCount + 1,
-      staticInstructionsChars: fallbackPrompt.length - chunkText.length,
-      policyChunkChars: chunkText.length,
-      finalPromptChars: fallbackPrompt.length
-    };
+  } catch (err: any) {
+    if (signal?.aborted) throw err;
+    console.error(`[PrivacyLens] GROQ REQUEST ERROR
+  doc=${docTag}
+  chunk=${chunkIndex}
+  errorCode=DOC_ABORT
+  status=Local
+  retryAfter=null
+  remainingTPM=null`);
+    throw err;
   }
 }

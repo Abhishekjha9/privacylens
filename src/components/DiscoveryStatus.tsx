@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, FileSearch, Loader2, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { Shield, FileSearch, Loader2, CheckCircle2, XCircle, Clock, AlertCircle } from 'lucide-react';
 import type { DiscoveredDocState, DiscoveredDocStatus } from '../types/policy';
 import type { ExtractionState } from '../types/policy';
 
@@ -20,6 +20,8 @@ const StatusIcon: React.FC<{ status: DiscoveredDocStatus }> = ({ status }) => {
   switch (status) {
     case 'complete':
       return <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />;
+    case 'partial':
+      return <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />;
     case 'failed':
     case 'timed_out':
     case 'cancelled':
@@ -37,6 +39,7 @@ const statusText: Record<DiscoveredDocStatus, string> = {
   fetching: 'Fetching...',
   analyzing: 'Analyzing...',
   complete: 'Complete',
+  partial: 'Partially analyzed',
   failed: 'Failed',
   timed_out: 'Timed out',
   cancelled: 'Cancelled'
@@ -99,6 +102,8 @@ export const DiscoveryStatus: React.FC<DiscoveryStatusProps> = ({ state, discove
                 className={`flex items-center gap-2 p-2 rounded-lg text-sm transition-colors ${
                   docState.status === 'complete'
                     ? 'bg-emerald-50 border border-emerald-100'
+                    : docState.status === 'partial'
+                    ? 'bg-amber-50 border border-amber-100'
                     : docState.status === 'failed' || docState.status === 'timed_out' || docState.status === 'cancelled'
                     ? 'bg-red-50 border border-red-100'
                     : docState.status === 'analyzing' || docState.status === 'fetching'
@@ -110,6 +115,7 @@ export const DiscoveryStatus: React.FC<DiscoveryStatusProps> = ({ state, discove
                 <span className={`flex-1 font-medium truncate ${
                   (docState.status === 'failed' || docState.status === 'timed_out' || docState.status === 'cancelled') ? 'text-red-700' :
                   docState.status === 'complete' ? 'text-emerald-800' :
+                  docState.status === 'partial' ? 'text-amber-800' :
                   'text-gray-700'
                 }`}>
                   {docState.link.text || DOC_TYPE_LABEL[docState.link.type] || 'Legal Document'}
@@ -117,11 +123,14 @@ export const DiscoveryStatus: React.FC<DiscoveryStatusProps> = ({ state, discove
                 <span className={`text-xs shrink-0 ${
                   (docState.status === 'failed' || docState.status === 'timed_out' || docState.status === 'cancelled') ? 'text-red-500' :
                   docState.status === 'complete' ? 'text-emerald-600' :
+                  docState.status === 'partial' ? 'text-amber-600' :
                   'text-gray-400'
                 }`}>
                   {(docState.status === 'failed' || docState.status === 'timed_out' || docState.status === 'cancelled') ? (docState.error || 'Failed') : 
                    (docState.status === 'analyzing' && docState.progress !== undefined) 
                      ? `Analyzing... ${docState.progress}%` 
+                     : (docState.status === 'partial' && (docState as any).chunksSucceeded !== undefined)
+                     ? `Coverage: ${(docState as any).chunksSucceeded} of ${(docState as any).chunksTotal} parts analyzed`
                      : statusText[docState.status]}
                 </span>
               </div>

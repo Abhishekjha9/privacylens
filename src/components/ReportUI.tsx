@@ -7,8 +7,10 @@ interface ReportUIProps {
 }
 
 export const ReportUI: React.FC<ReportUIProps> = ({ analysis }) => {
-  const successCount = analysis.documentsAnalyzed?.filter(d => d.success).length || 1;
+  const successCount = analysis.documentsAnalyzed?.filter(d => d.status === 'complete' || d.status === 'partial' || (d as any).success).length || 1;
   const docText = `${successCount} document${successCount !== 1 ? 's' : ''} analyzed`;
+
+  const hasPartialDocs = analysis.documentsAnalyzed?.some(d => d.status === 'partial');
 
   // Filter out NOT_FOUND from Detailed Findings
   const detailedFindings = analysis.categories.filter(c => c.risk !== 'NOT_FOUND');
@@ -40,6 +42,17 @@ export const ReportUI: React.FC<ReportUIProps> = ({ analysis }) => {
           {docText}
         </div>
       </div>
+
+      {hasPartialDocs && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl shadow-sm p-4 text-sm text-amber-800">
+          <div className="flex items-start gap-2">
+            <Info className="w-4 h-4 mt-0.5 shrink-0" />
+            <p>
+              Some parts could not be analyzed because the AI rate limit was reached. Results below are based on partially analyzed documents.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Documents analyzed banner (multi-doc mode) */}
       {analysis.documentsAnalyzed && analysis.documentsAnalyzed.length > 0 && (
@@ -78,9 +91,13 @@ interface DocResult {
   url: string;
   title: string;
   source: string;
-  confidence: string;
-  success: boolean;
+  success?: boolean;
+  status?: "complete" | "partial" | "failed";
+  chunksTotal?: number;
+  chunksSucceeded?: number;
+  chunksFailed?: number;
   error?: string;
+  errors?: { code: string; chunk: number }[];
   findingsCount?: number;
 }
 
@@ -93,7 +110,7 @@ const DOC_TYPE_LABEL: Record<string, string> = {
 
 const DocumentsBanner: React.FC<{ docs: DocResult[] }> = ({ docs }) => {
   const [expanded, setExpanded] = useState(false);
-  const successCount = docs.filter(d => d.success).length;
+  const successCount = docs.filter(d => d.status === 'complete' || d.status === 'partial' || (d as any).success).length;
   if (docs.length === 0) return null;
 
   return (
@@ -112,10 +129,17 @@ const DocumentsBanner: React.FC<{ docs: DocResult[] }> = ({ docs }) => {
 
       {expanded && (
         <div className="px-3 pb-3 pt-1 border-t border-gray-100 space-y-2">
-          {docs.map((doc, idx) => (
+          {docs.map((doc, idx) => {
+            const isSuccess = doc.status === 'complete' || (doc as any).success;
+            const isPartial = doc.status === 'partial';
+            const isFailed = doc.status === 'failed' || (!(doc as any).success && !doc.status);
+
+            return (
             <div key={idx} className="flex items-start gap-2 py-1">
-              {doc.success ? (
+              {isSuccess ? (
                 <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+              ) : isPartial ? (
+                <Info className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
               ) : (
                 <XCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
               )}
@@ -124,7 +148,7 @@ const DocumentsBanner: React.FC<{ docs: DocResult[] }> = ({ docs }) => {
                   <p className="text-sm font-medium text-gray-800 truncate">
                     {doc.title || DOC_TYPE_LABEL[doc.type] || 'Document'}
                   </p>
-                  {doc.url && doc.success && (
+                  {doc.url && (isSuccess || isPartial) && (
                     <button
                       title={`Open ${doc.title || 'document'} in new tab`}
                       onClick={() => chrome.tabs.create({ url: doc.url })}
@@ -134,15 +158,19 @@ const DocumentsBanner: React.FC<{ docs: DocResult[] }> = ({ docs }) => {
                     </button>
                   )}
                 </div>
-                {!doc.success && doc.error && (
-                  <p className="text-xs text-red-500 mt-0.5">{doc.error}</p>
+                {isFailed && doc.errors && doc.errors.length > 0 && (
+                  <p className="text-xs text-red-500 mt-0.5">{doc.errors.map(e => e.code).join(', ')}</p>
                 )}
-                {doc.success && doc.findingsCount !== undefined && (
+                {isPartial && (
+                  <p className="text-xs text-amber-600 mt-0.5">Coverage: {doc.chunksSucceeded} of {doc.chunksTotal} parts analyzed</p>
+                )}
+                {(isSuccess || isPartial) && doc.findingsCount !== undefined && (
                   <p className="text-xs text-gray-500 mt-0.5">{doc.findingsCount} finding{doc.findingsCount !== 1 ? 's' : ''}</p>
                 )}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

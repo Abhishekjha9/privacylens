@@ -64,7 +64,7 @@ export interface DiscoveryResponse {
 }
 
 /** Status of a discovered document during retrieval + analysis */
-export type DiscoveredDocStatus = "waiting" | "fetching" | "analyzing" | "complete" | "failed" | "timed_out" | "cancelled";
+export type DiscoveredDocStatus = "waiting" | "fetching" | "analyzing" | "complete" | "partial" | "failed" | "timed_out" | "cancelled";
 export interface DiscoveredDocState {
   link: DiscoveredLink;
   status: DiscoveredDocStatus;
@@ -74,6 +74,9 @@ export interface DiscoveredDocState {
   /** Source URL for evidence navigation */
   sourceUrl?: string;
   progress?: number;
+  chunksTotal?: number;
+  chunksSucceeded?: number;
+  chunksFailed?: number;
 }
 
 // Extractor states

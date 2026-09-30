@@ -241,8 +241,11 @@ export default function App() {
           } else if (event.type === 'doc-complete') {
             setDiscoveredDocs(prev => prev.map(d => d.title === event.title || d.link.url === event.url ? { 
               ...d, 
-              status: event.success ? 'complete' : (event.timedOut ? 'timed_out' : 'failed'), 
-              error: event.error || (event.timedOut ? 'Analysis timed out' : undefined) 
+              status: (event as any).status || (event.success ? 'complete' : (event.timedOut ? 'timed_out' : 'failed')), 
+              error: event.error || (event.timedOut ? 'Analysis timed out' : undefined),
+              chunksTotal: (event as any).chunksTotal,
+              chunksSucceeded: (event as any).chunksSucceeded,
+              chunksFailed: (event as any).chunksFailed,
             } : d));
           } else if (event.type === 'overall-timeout') {
             setProgressLabel('Finishing partial analysis (Timeout)...');
